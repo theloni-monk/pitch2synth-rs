@@ -115,16 +115,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (detector_tx, pitch_rx): (Sender<(f32, f32, bool, f32)>, Receiver<(f32, f32, bool, f32)>)=spmc::channel();
 
     // run pitch estimator in new thread
-    thread::spawn(||{
+    let pitch_thread_handle = thread::Builder::new().name("PitchDetectionThread".to_string()).spawn(||{
         let mut detector = pitchdetect::PitchEstimator::new(48000, detector_rx, detector_tx);//TODO: query sample rate
         detector.run();
-    });
+    }).unwrap();
 
     let midi_handler_rx = pitch_rx.clone();
-    thread::spawn(||{
+    let midi_thread_handle = thread::Builder::new().name("MidiHandlerThread".to_string()).spawn(||{
         let mut handler = midihandler::MidiHandler::new(midi_handler_rx);
         handler.run();
-    });
+    }).unwrap();
 
 
     // create app and run it
