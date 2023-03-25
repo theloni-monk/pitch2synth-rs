@@ -6,7 +6,7 @@ use crossterm::{
 use std::{
     error::Error,
     io,
-    time::{Duration, Instant}, iter::zip, sync::mpsc::{self, Receiver, Sender},
+    time::{Duration, Instant}
 };
 use tui::{
     backend::{Backend, CrosstermBackend},
@@ -18,29 +18,39 @@ use tui::{
     Frame, Terminal,
 };
 use cpal::traits::{HostTrait, DeviceTrait, StreamTrait};
-use cpal::{Data, Sample, SampleFormat, FromSample};
+use cpal::SampleFormat;
+use  spmc::{Receiver, Sender};
+use std::thread;
 use closure::closure;
+use ringbuffer::{AllocRingBuffer, RingBufferWrite, RingBufferExt};
+mod pitchdetect;
 
-
-const BUFFSIZE:usize = 1024;
-
+const SNAPSHOT_BUFFLEN:usize = 1024;
+const CONTOUR_BUFFLEN:usize = 128;
 
 struct App {
-    waveform_snapshot: [(f32, f32); BUFFSIZE],
-    window: [f64; 2],
+    waveform_snapshot: [(f32, f32); SNAPSHOT_BUFFLEN],
+    f0_contour: AllocRingBuffer<(f32, f32)>,
+    wavviz_window: [f64; 2],
+    f0_window: [f64; 2]
 }
 
 impl App {
     fn new() -> App {
         App {
-            waveform_snapshot: [(0.0, 0.0);BUFFSIZE],
-            window: [0.0, 63555000.0],
+            waveform_snapshot: [(0.0, 0.0);SNAPSHOT_BUFFLEN],
+            wavviz_window: [0.0, 63555000.0],
+            f0_contour: AllocRingBuffer::with_capacity(CONTOUR_BUFFLEN),
+            f0_window: [0.0, 63555000.0]
         }
     }
 
     fn on_tick(&mut self) {
-        self.window[0] = self.waveform_snapshot[0].0 as f64;
-        self.window[1] = self.waveform_snapshot[BUFFSIZE-1].0 as f64;
+        self.wavviz_window[0] = self.waveform_snapshot[0].0 as f64;
+        self.wavviz_window[1] = self.waveform_snapshot[SNAPSHOT_BUFFLEN-1].0 as f64;
+        self.f0_window[0] = self.f0_contour.get(0).unwrap_or(&(0.0, 0.0)).0 as f64;
+        self.f0_window[1] = self.f0_contour.get(-1).unwrap_or(&(0.0, 0.0)).0 as f64;
+        
     }
 }
 
@@ -52,10 +62,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    
+
 
     //setup audio stream
     let host = cpal::default_host();
+    //TODO: get focusrite device and set sample rate to 48khz, not max
     let device = host.default_input_device().expect("No input device available");
     let mut supported_configs_range = device.supported_input_configs().expect("error while querying configs");
     let supported_config = supported_configs_range.next().expect("no supported config?!")
@@ -63,23 +74,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     let err_fn = |err| eprintln!("an error occurred on the output audio stream: {}", err);
     let sample_format = supported_config.sample_format();
     let config = supported_config.into();
-    //println!("{:?}", config);
 
-    let (tx, rx): (Sender<[(f32, f32);BUFFSIZE]>, Receiver<[(f32, f32);BUFFSIZE]>) = mpsc::channel();
-    let audio_tx = tx.clone();
+    let (audio_tx, audio_rx): (Sender<[(f32, f32);SNAPSHOT_BUFFLEN]>, Receiver<[(f32, f32);SNAPSHOT_BUFFLEN]>) = spmc::channel();
+
     let mut prev_time = Instant::now();
     let mut time = 0.0;
     let stream = match sample_format {
         SampleFormat::F32 => device.build_input_stream(&config, 
-            closure!(move mut time, move mut prev_time,   move audio_tx, |input:&[f32], callbackdata| {
+            closure!(move mut time, move mut prev_time, move mut audio_tx, |input:&[f32], callbackdata| {
                 
                 let timediff = (Instant::now().duration_since(prev_time)).as_micros() as f32;
                 
-                let mut amps= [0.0;BUFFSIZE];
-                amps.clone_from_slice(&input[0..BUFFSIZE]);
+                let mut amps= [0.0;SNAPSHOT_BUFFLEN];
+                amps.clone_from_slice(&input[0..SNAPSHOT_BUFFLEN]);
                 
-                let mut out = [(0.0, 0.0);BUFFSIZE];
-                for i in 0..BUFFSIZE{
+                let mut out = [(0.0, 0.0);SNAPSHOT_BUFFLEN];
+                for i in 0..SNAPSHOT_BUFFLEN{
                     let t = time + ((i+1) as f32 *timediff) as f32;
                     out[i] = (t, amps[i]);
                 }
@@ -95,11 +105,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     stream.play().unwrap();
 
 
+
+    let detector_rx = audio_rx.clone();
+    let (detector_tx, pitch_rx): (Sender<(f32, f32, bool, f32)>, Receiver<(f32, f32, bool, f32)>)=spmc::channel();
+
+    
+    thread::spawn(closure!(||{
+        let mut detector = pitchdetect::PitchEstimator::new(48000, detector_rx, detector_tx);//TODO: query sample rate
+        detector.run();
+    }));
+
+
     // create app and run it
     let tick_rate = Duration::from_millis(1);
     
     let app = App::new();
-    let res = run_app(&mut terminal, app, tick_rate, rx);
+    let res = run_app(&mut terminal, app, tick_rate, audio_rx, pitch_rx);
 
     // restore terminal
     disable_raw_mode()?;
@@ -121,12 +142,17 @@ fn run_app<B: Backend>(
     terminal: &mut Terminal<B>,
     mut app: App,
     tick_rate: Duration, 
-     snapshot_rx: Receiver<[(f32, f32);BUFFSIZE]>
+    snapshot_rx: Receiver<[(f32, f32);SNAPSHOT_BUFFLEN]>,
+    contour_rx: Receiver<(f32, f32, bool, f32)>
 ) -> io::Result<()> {
     let mut last_tick = Instant::now();
     
+    let mut prev_timestamp = 0.0f32;//FIXME: accumulating latency
     loop {
         app.waveform_snapshot = snapshot_rx.recv().unwrap();
+        let (timestamp, f0, voiced, vprob) = contour_rx.try_recv().unwrap_or((prev_timestamp, 0.0f32, false, 0.0f32));
+        prev_timestamp = timestamp;
+        app.f0_contour.push((timestamp, f0));
 
         terminal.draw(|f| ui(f, &app))?;
 
@@ -154,32 +180,32 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
         .direction(Direction::Vertical)
         .constraints(
             [
-                Constraint::Ratio(1, 3)
+                Constraint::Ratio(1, 2),
+                Constraint::Ratio(1, 2),
             ]
             .as_ref(),
         )
         .split(size);
-    let x_labels = vec![
+    let wavviz_x_labels = vec![
         Span::styled(
-            format!("{}", app.window[0]),
+            format!("{}", app.wavviz_window[0]),
             Style::default().add_modifier(Modifier::BOLD),
         ),
-        Span::raw(format!("{}", (app.window[0] + app.window[1]) / 2.0)),
+        Span::raw(format!("{}", (app.wavviz_window[0] + app.wavviz_window[1]) / 2.0)),
         Span::styled(
-            format!("{}", app.window[1]),
+            format!("{}", app.wavviz_window[1]),
             Style::default().add_modifier(Modifier::BOLD),
         ),
     ];
-    let data = app.waveform_snapshot.iter().map(|&e| (e.0 as f64, e.1 as f64)).collect::<Vec::<(f64,f64)>>();
-    let datasets = vec![
+    let wav_data = app.waveform_snapshot.iter().map(|&e| (e.0 as f64, e.1 as f64)).collect::<Vec::<(f64,f64)>>();
+    let wav_datavec = vec![
         Dataset::default()
             .name("waveform_snapshot")
             .marker(symbols::Marker::Dot)
             .style(Style::default().fg(Color::Cyan))
-            .data(data.as_slice())
+            .data(wav_data.as_slice())
     ];
-
-    let chart = Chart::new(datasets)
+    let chart = Chart::new(wav_datavec)
         .block(
             Block::default()
                 .title(Span::styled(
@@ -194,8 +220,8 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
             Axis::default()
                 .title("Timestep")
                 .style(Style::default().fg(Color::Gray))
-                .labels(x_labels)
-                .bounds(app.window),
+                .labels(wavviz_x_labels)
+                .bounds(app.wavviz_window),
         )
         .y_axis(
             Axis::default()
@@ -209,5 +235,58 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
                 .bounds([-1.0, 1.0]),
         );
     f.render_widget(chart, chunks[0]);
+
+
+
+
+    let mut f0_data = app.f0_contour.iter().map(|&e| (e.0 as f64, e.1 as f64)).collect::<Vec::<(f64,f64)>>().clone();
+    f0_data.reverse();
+    let f0_x_labels = vec![
+        Span::styled(
+            format!("{}", app.f0_window[0]),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!("{}", (app.f0_window[0] + app.f0_window[1]) / 2.0)),
+        Span::styled(
+            format!("{}", app.f0_window[1]),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ];
+    let f0_datavec = vec![
+        Dataset::default()
+            .name("f0_snapshot")
+            .marker(symbols::Marker::Dot)
+            .style(Style::default().fg(Color::LightMagenta))
+            .data(f0_data.as_slice())
+    ];
+    let chart = Chart::new(f0_datavec)
+        .block(
+            Block::default()
+                .title(Span::styled(
+                    "f0",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .borders(Borders::ALL),
+        )
+        .x_axis(
+            Axis::default()
+                .title("Timestep")
+                .style(Style::default().fg(Color::Gray))
+                .labels(f0_x_labels)
+                .bounds(app.f0_window)
+        )
+        .y_axis(
+            Axis::default()
+                .title("Frequency")
+                .style(Style::default().fg(Color::Gray))
+                .labels(vec![
+                    Span::styled("0hz", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("660hz", Style::default().add_modifier(Modifier::BOLD)),
+                ])
+                .bounds([0.0, 660.0]),
+        );
+    f.render_widget(chart, chunks[1]);
     
 }
