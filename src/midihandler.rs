@@ -2,6 +2,8 @@ use midly::{Smf, live::LiveEvent, MidiMessage};
 use midir::{MidiOutput, MidiOutputConnection, MidiOutputPort};
 use  spmc::{Receiver};
 
+const C0: f32 = 16.3515978313;
+
 struct MidiNote{
     note: u8, // midi byte encoding of a note value
     vel: u8 // how strongly the note is played
@@ -11,6 +13,14 @@ pub struct MidiHandler{
     freq_rx: Receiver<(f32, f32, bool, f32)>,
     curr_note: MidiNote,
     voiced: bool
+}
+
+fn get_midi_note(frequency: &f32) -> u8 {
+    let semitone = 12.0 * f32::log10(frequency / C0) / f32::log10(2.0);
+    // dbg!(semitone);
+    let octave = (&semitone / 12.0).round(); 
+    let note = semitone - 12.0 * octave;
+    note as u8
 }
 
 impl MidiHandler{
@@ -30,8 +40,24 @@ impl MidiHandler{
          * Decide if note is being played
          * Send midi event over USB
          */
+
+        let mut prev_timestamp = 0.0f32;
+        let mut prev_f0 = 0.0f32;
+        let mut prev_voiced = false;
+        
         loop{
-            //WRITEME
+            let (timestamp, f0, voiced, _vprob) = self.freq_rx.recv().unwrap();
+            // prev_timestamp = timestamp;
+            // if prev_f0 != f0 {
+            //     // println!("{:?}", get_midi_note(&f0));
+            // }
+            // prev_f0 = f0;
+            // prev_voiced = voiced;
+
+            
+
+            // println!("{:#?}", self.freq_rx.recv().unwrap());
+            // std::process::exit(0);
         }
     }
 
