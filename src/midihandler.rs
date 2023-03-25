@@ -1,8 +1,11 @@
+use std::time::{Instant, Duration};
+
 use midly::{Smf, live::LiveEvent, MidiMessage};
 use midir::{MidiOutput, MidiOutputConnection, MidiOutputPort};
 use  spmc::{Receiver};
 
 const C0: f32 = 16.3515978313;
+const POLL_TIME:u64 = 50; //ms
 
 struct MidiNote{
     note: u8, // midi byte encoding of a note value
@@ -40,22 +43,25 @@ impl MidiHandler{
          * Decide if note is being played
          * Send midi event over USB
          */
+        //TOdo; poll every 50ms
+        let mut prev_poll = Instant::now();
 
         let mut prev_timestamp = 0.0f32;
         let mut prev_f0 = 0.0f32;
         let mut prev_voiced = false;
         
         loop{
-            let (timestamp, f0, voiced, _vprob) = self.freq_rx.recv().unwrap();
-            // prev_timestamp = timestamp;
-            // if prev_f0 != f0 {
-            //     // println!("{:?}", get_midi_note(&f0));
-            // }
-            // prev_f0 = f0;
-            // prev_voiced = voiced;
-
+            let poll_time = Instant::now().duration_since(prev_poll);
+            if poll_time>Duration::from_millis(POLL_TIME){
+                let (timestamp, f0, voiced, _vprob) = self.freq_rx.recv().unwrap();
+                if prev_f0 != f0 && voiced {
+                    println!("{:?}", get_midi_note(&f0));
+                }
+                prev_f0 = f0;
+                prev_voiced = voiced;
+                prev_poll = Instant::now();
+            }
             
-
             // println!("{:#?}", self.freq_rx.recv().unwrap());
             // std::process::exit(0);
         }
