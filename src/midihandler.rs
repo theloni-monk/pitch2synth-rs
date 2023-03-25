@@ -1,5 +1,7 @@
 use midly::{Smf, live::LiveEvent, MidiMessage};
 use midir::{MidiOutput, MidiOutputConnection, MidiOutputPort};
+use  spmc::{Receiver};
+
 struct MidiNote{
     note: u8, // midi byte encoding of a note value
     vel: u8 // how strongly the note is played
@@ -15,14 +17,14 @@ impl MidiHandler{
     pub fn new(f0_rx:Receiver<(f32, f32, bool, f32)>) -> MidiHandler{
         MidiHandler{
             freq_rx: f0_rx,
-            curr_note: MidiNote{ 0, 0},
+            curr_note: MidiNote{ note:0, vel:0},
             voiced: false
         }
     }
 
-    pub fn run(){
+    pub fn run(&mut self){
         // Your code here:
-        /**You probably want something akin to:
+        /* You probably want something akin to:
          * Get freq from channel
          * Process freq data based on past freq data
          * Decide if note is being played

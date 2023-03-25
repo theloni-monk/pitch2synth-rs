@@ -25,6 +25,7 @@ use closure::closure;
 use ringbuffer::{AllocRingBuffer, RingBufferWrite, RingBufferExt};
 
 mod pitchdetect;
+mod midihandler;
 
 const SNAPSHOT_BUFFLEN:usize = 1024;
 const CONTOUR_BUFFLEN:usize = 128;
@@ -114,10 +115,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (detector_tx, pitch_rx): (Sender<(f32, f32, bool, f32)>, Receiver<(f32, f32, bool, f32)>)=spmc::channel();
 
     // run pitch estimator in new thread
-    thread::spawn(closure!(||{
+    thread::spawn(||{
         let mut detector = pitchdetect::PitchEstimator::new(48000, detector_rx, detector_tx);//TODO: query sample rate
         detector.run();
-    }));
+    });
+
+    let midi_handler_rx = pitch_rx.clone();
+    thread::spawn(||{
+        let mut handler = midihandler::MidiHandler::new(midi_handler_rx);
+        handler.run();
+    });
 
 
     // create app and run it
