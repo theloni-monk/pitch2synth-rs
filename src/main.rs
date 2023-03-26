@@ -18,17 +18,37 @@ use tui::{
     widgets::{Axis, Block, Borders, Chart, Dataset},
     Frame, Terminal,
 };
-use cpal::traits::{HostTrait, DeviceTrait, StreamTrait};
-use cpal::SampleFormat;
-use  spmc::{Receiver, Sender};
+use clap::Parser;
+use cpal::{traits::{HostTrait, DeviceTrait, StreamTrait}, SampleFormat, Device, SupportedStreamConfigRange};
 use closure::closure;
 use ringbuffer::{AllocRingBuffer, RingBufferWrite, RingBufferExt};
+use bus::{Bus, BusReader};
 
 mod pitchdetect;
 mod midihandler;
-
-const SNAPSHOT_BUFFLEN:usize = 1024;
+//FIXME: allow for oversized buffer
+const SNAPSHOT_BUFFLEN:usize = 1024; //882
 const CONTOUR_BUFFLEN:usize = 128;
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct AppArgs{
+
+    #[arg(short, long, default_value_t = {"default".to_string()})]
+    device_name: String,
+
+    #[arg(short, long, default_value_t = 48000)]
+    srate: usize,
+
+    #[arg(short, long, default_value_t = 2.0)]
+    power_thresh: f32,
+
+    #[arg(short, long, default_value_t = 0.2)]
+    clairty_thresh: f32,
+
+    #[arg(short, long, default_value_t = false)]
+    no_ui: bool
+}
 
 struct App {
     waveform_snapshot: [(f32, f32); SNAPSHOT_BUFFLEN],
@@ -53,11 +73,12 @@ impl App {
         self.wavviz_window[1] = self.waveform_snapshot[SNAPSHOT_BUFFLEN-1].0 as f64;
         self.f0_window[0] = self.f0_contour.get(0).unwrap_or(&(0.0, 0.0)).0 as f64;
         self.f0_window[1] = self.f0_contour.get(-1).unwrap_or(&(0.0, 0.0)).0 as f64;
-        
     }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+
+    let args = AppArgs::parse();
 
     // setup terminal
     enable_raw_mode()?;
@@ -69,8 +90,16 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     //setup audio stream
     let host = cpal::default_host();
-    //TODO: get focusrite device and set sample rate to 48khz, not max
-    let device = host.default_input_device().expect("No input device available");
+    let mut device = host.default_input_device().expect("No input device available");
+    if args.device_name != "default" {
+        device = host.input_devices().unwrap().into_iter()
+        .find(|d|
+            {
+               d.name().unwrap().contains(&args.device_name)
+            }
+        ).unwrap();
+    }
+    
     let mut supported_configs_range = device.supported_input_configs().expect("error while querying configs");
     let supported_config = supported_configs_range.next().expect("no supported config?!")
     .with_max_sample_rate();
@@ -78,29 +107,40 @@ fn main() -> Result<(), Box<dyn Error>> {
     let sample_format = supported_config.sample_format();
     let config = supported_config.into();
 
-    //establish channel
-    let (audio_tx, audio_rx): (Sender<[(f32, f32);SNAPSHOT_BUFFLEN]>, Receiver<[(f32, f32);SNAPSHOT_BUFFLEN]>) = spmc::channel();
+    // list available devices and their properties
+    if args.no_ui{
+        println!("Devices: {:#?}", 
+        host.devices().unwrap().into_iter().map(
+            |d:Device|->String{
+                format!("{} => {:?}",
+                d.name().unwrap(), 
+                d.supported_input_configs().unwrap().into_iter().collect::<Vec<SupportedStreamConfigRange>>())}
+            )
+            .collect::<Vec<String>>()
+        );
+        println!("Selected device: {}", device.name().unwrap());
+    }
 
+    //establish channel
+    let mut snapshot_bus:Bus<[(f32, f32);SNAPSHOT_BUFFLEN]> =Bus::new(8);
+    let pitch_snapshot_rx = snapshot_bus.add_rx();
+    let wavviz_snapshot_rx = snapshot_bus.add_rx();
     // init timing vars
     let prev_time = Instant::now();
     let time = 0.0;
+    //let audio_thread_snapshot_ref:Arc<Mutex<[(f32, f32); SNAPSHOT_BUFFLEN]>> = Arc::clone(&snapshot);
     let stream = match sample_format {
         SampleFormat::F32 => device.build_input_stream(&config, 
-            closure!(move mut time, move mut prev_time, move mut audio_tx, |input:&[f32], _callbackdata| {
+            closure!(move mut time, move mut prev_time, move mut snapshot_bus, |input:&[f32], _callbackdata| {
                 
                 let timediff = (Instant::now().duration_since(prev_time)).as_micros() as f32;
-                
-                let mut samples= [0.0;SNAPSHOT_BUFFLEN];
-                samples.clone_from_slice(&input[0..SNAPSHOT_BUFFLEN]);
-                
-                let mut out = [(0.0, 0.0);SNAPSHOT_BUFFLEN];
-                for i in 0..SNAPSHOT_BUFFLEN{
-                    let t = time + ((i+1) as f32 *timediff) as f32;
-                    out[i] = (t, samples[i]); // create tuple of timestamp with each sample
-                }
 
-                audio_tx.send(out).unwrap(); 
-                
+                let mut out:[(f32, f32);SNAPSHOT_BUFFLEN] = [(0.0,0.0); SNAPSHOT_BUFFLEN];
+                for i in 0..input.len(){
+                    let t = time + ((i+1) as f32 *timediff) as f32;
+                    out[i] = (t, input[i]); // create tuple of timestamp with each sample
+                } 
+                snapshot_bus.broadcast(out);
                 time += timediff;
                 prev_time = Instant::now();
             }), 
@@ -111,17 +151,23 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 
     // establish commincation lines to pitch estimator thread
-    let detector_rx = audio_rx.clone();
-    let (detector_tx, pitch_rx): (Sender<(f32, f32, bool, f32)>, Receiver<(f32, f32, bool, f32)>)=spmc::channel();
-
+   
     // run pitch estimator in new thread
-    let pitch_thread_handle = thread::Builder::new().name("PitchDetectionThread".to_string()).spawn(||{
-        let mut detector = pitchdetect::PitchEstimator::new(48000, detector_rx, detector_tx);//TODO: query sample rate
-        detector.run();
-    }).unwrap();
+    let mut f0_bus:Bus<(f32, f32, bool, f32)> = Bus::new(8);
+    let freqviz_rx = f0_bus.add_rx();
+    let midi_handler_rx = f0_bus.add_rx();
 
-    let midi_handler_rx = pitch_rx.clone();
-    let midi_thread_handle = thread::Builder::new().name("MidiHandlerThread".to_string()).spawn(||{
+    let sr = args.srate.clone();
+    let pthresh = args.power_thresh.clone();
+    let cthresh = args.clairty_thresh.clone();
+    let _pitch_thread_handle = thread::Builder::new().name("PitchDetectionThread".to_string())
+    .spawn(closure!(move sr, move pthresh, move cthresh, move pitch_snapshot_rx, move mut f0_bus, ||{
+        let mut detector = pitchdetect::PitchEstimator::new(sr, pitch_snapshot_rx, f0_bus, pthresh, cthresh);//TODO: query sample rate
+        detector.run();
+    })).unwrap();
+
+    let _midi_thread_handle = thread::Builder::new().name("MidiHandlerThread".to_string())
+    .spawn(||{
         let mut handler = midihandler::MidiHandler::new(midi_handler_rx);
         handler.run();
     }).unwrap();
@@ -130,7 +176,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // create app and run it
     let tick_rate = Duration::from_millis(1);
     let app = App::new();
-    let res = run_app(&mut terminal, app, tick_rate, audio_rx, pitch_rx);
+    let res = run_app(&mut terminal, app, tick_rate, wavviz_snapshot_rx, freqviz_rx, !args.no_ui);
 
     // restore terminal
     disable_raw_mode()?;
@@ -152,26 +198,22 @@ fn run_app<B: Backend>(
     terminal: &mut Terminal<B>,
     mut app: App,
     tick_rate: Duration, 
-    snapshot_rx: Receiver<[(f32, f32);SNAPSHOT_BUFFLEN]>,
-    contour_rx: Receiver<(f32, f32, bool, f32)>
+    mut snapshot_rx: BusReader<[(f32, f32); SNAPSHOT_BUFFLEN]>,
+    mut contour_rx: BusReader<(f32, f32, bool, f32)>,
+    render_ui: bool
 ) -> io::Result<()> {
     let mut last_tick = Instant::now();
     
-    let mut prev_timestamp = 0.0f32;
-    let mut prev_f0 = 0.0f32;
-    let mut prev_voiced = false;
     loop {
         // wait for new audio frame
-        app.waveform_snapshot = snapshot_rx.recv().unwrap();
+        app.waveform_snapshot = snapshot_rx.recv().unwrap();//_or([(0.0,0.0);SNAPSHOT_BUFFLEN]);
+
         // attempt to read new freq frame, if fail: use previous values
-        let (timestamp, f0, voiced, _vprob) = contour_rx.try_recv().unwrap_or((prev_timestamp, prev_f0, prev_voiced, 0.0f32));
-        prev_timestamp = timestamp;
-        prev_f0 = f0;
-        prev_voiced = voiced;
+        let (timestamp, f0, voiced, _vprob) = contour_rx.recv().unwrap();//.unwrap_or((prev_timestamp, prev_f0, prev_voiced, 0.0f32));
         app.f0_contour.push((timestamp, if voiced {f0} else {0.0f32}));
 
         // render ui
-        terminal.draw(|f| ui(f, &app))?;
+        if render_ui {terminal.draw(|f| ui(f, &app))?;}
 
         // poll for quit event
         let timeout = tick_rate

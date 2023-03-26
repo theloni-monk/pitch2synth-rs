@@ -1,45 +1,45 @@
 use pitch_detection::Pitch;
-use spmc::{Sender, Receiver};
+use bus::{Bus,BusReader};
 use pitch_detection::detector::mcleod::McLeodDetector;
 use pitch_detection::detector::PitchDetector;
 
-//TODO: query these
-const SNAPSHOT_BUFFLEN:usize = 1024;
-const SAMPLE_RATE: usize = 48000;
-
+const SNAPSHOT_BUFFLEN:usize = 1024;//882;//1024;
 const PADDING: usize = SNAPSHOT_BUFFLEN / 2;
-//TODO: tune
-const POWER_THRESHOLD: f32 = 2.0;
-const CLARITY_THRESHOLD: f32 = 0.4;
+// we capture audio in 20ms chunks so it would be wasteful to attempt to aquire a lock more frequently than 20ms
 
 pub struct PitchEstimator{
-    audio_rx: Receiver<[(f32, f32);SNAPSHOT_BUFFLEN]>,
-    pitch_tx: Sender<(f32, f32, bool, f32)>, //sends (frequency float in hz, voiced bool, voiced probability float)
-    waveform_snapshot: [f32; SNAPSHOT_BUFFLEN],
-    predictor: McLeodDetector<f32> 
+    audio_rx:BusReader<[(f32, f32);SNAPSHOT_BUFFLEN]>,
+    srate: usize,
+    pitch_tx: Bus<(f32, f32, bool, f32)>, //sends (frequency float in hz, voiced bool, voiced probability float)
+    waveform_snapshot: [(f32,f32); SNAPSHOT_BUFFLEN],
+    predictor: McLeodDetector<f32>,
+    pthresh: f32,
+    cthresh: f32
 }
 
 impl PitchEstimator{
-    pub fn new(sr:u32, rx:Receiver<[(f32, f32);SNAPSHOT_BUFFLEN]>, tx:Sender<(f32, f32, bool, f32)>) -> PitchEstimator{
+    pub fn new(sr:usize, snapshot_ref:BusReader<[(f32, f32); SNAPSHOT_BUFFLEN]>, tx:Bus<(f32, f32, bool, f32)>, pthresh:f32, cthresh:f32) -> PitchEstimator{
         let detector = McLeodDetector::new(SNAPSHOT_BUFFLEN, PADDING);
         PitchEstimator { 
-            audio_rx: rx, 
+            audio_rx: snapshot_ref, 
+            srate: sr,
             pitch_tx: tx, 
-            waveform_snapshot: [0.0;SNAPSHOT_BUFFLEN], 
-            predictor: detector 
+            waveform_snapshot: [(0.0, 0.0); SNAPSHOT_BUFFLEN], 
+            predictor: detector,
+            pthresh: pthresh,
+            cthresh: cthresh 
         }
     }
     pub fn run(&mut self){
         loop{
-            let buff = self.audio_rx.recv().unwrap();
-            self.waveform_snapshot = buff.map(|el|{el.1});
-            
+            self.waveform_snapshot = self.audio_rx.recv().unwrap();
+            let timestamp = self.waveform_snapshot[0].0;
+
             let pitch = self.predictor
-            .get_pitch(&self.waveform_snapshot, SAMPLE_RATE, POWER_THRESHOLD, CLARITY_THRESHOLD)
+            .get_pitch(&self.waveform_snapshot.map(|el| {el.1}), self.srate, self.pthresh, self.cthresh)
             .unwrap_or(Pitch{frequency:0.0,clarity:0.0});
-            
-            //TODO: filter pitch output for smoother frequency contour
-            self.pitch_tx.send((buff[0].0, pitch.frequency, pitch.clarity>0.2, pitch.clarity)).expect("unable to send pitch compute");
+
+            self.pitch_tx.broadcast((timestamp, pitch.frequency, pitch.clarity>self.cthresh, pitch.clarity));
         }
     }
 }

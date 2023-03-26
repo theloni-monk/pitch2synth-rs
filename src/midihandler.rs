@@ -1,16 +1,14 @@
 use std::time::{Instant, Duration};
+use bus::BusReader;
 use midly::{Smf, live::LiveEvent, MidiMessage, Header, Format, Timing, num::{u4, u7}, TrackEventKind};
 use midir::{MidiOutput, MidiOutputConnection, MidiOutputPort};
 use ringbuffer::{AllocRingBuffer, RingBufferWrite, RingBufferExt};
-use  spmc::{Receiver};
 
-const POLL_TIME:u64 = 50; //ms
 const A4: f32 = 440.0;
 const BUFFER_CAP: u8 = 16;
 
-// feel free to modify or add any fields that may be useful
 pub struct MidiHandler{
-    freq_rx: Receiver<(f32, f32, bool, f32)>,
+    freq_rx: BusReader<(f32, f32, bool, f32)>,
     buffer: AllocRingBuffer<f32>,
     voiced: bool
 }
@@ -38,7 +36,7 @@ fn note_swap(channel: u8, key: u8, on: bool) -> TrackEventKind<'static>{
 }
 
 impl MidiHandler{
-    pub fn new(f0_rx:Receiver<(f32, f32, bool, f32)>) -> MidiHandler{
+    pub fn new(f0_rx:BusReader<(f32, f32, bool, f32)>) -> MidiHandler{
         MidiHandler{
             freq_rx: f0_rx,
             voiced: false,
@@ -66,20 +64,17 @@ impl MidiHandler{
                             });
         
         smf.tracks.push(Vec::new());
+
         //implement Live event messaging
-
         loop{
-            let poll_time = Instant::now().duration_since(prev_poll);
-            if poll_time>Duration::from_millis(POLL_TIME){
-
                 let (_timestamp, f0, _voiced, _vprob) = self.freq_rx.recv().unwrap();
-                // self.buffer.push(f0);
+                self.buffer.push(f0);
                 let note = get_midi_note(self.buffer.iter().sum::<f32>() / BUFFER_CAP as f32);
                 if note != last_note {
                     let diff = Instant::now().duration_since(last_event).as_millis();
 
-                    // smf.tracks[0].push(midly::TrackEvent {delta: (diff as u32).into(), kind: note_swap(0, last_note, false)});
-                    // smf.tracks[0].push(midly::TrackEvent {delta: 0.into(), kind: note_swap(0, note, true)});
+                    smf.tracks[0].push(midly::TrackEvent {delta: (diff as u32).into(), kind: note_swap(0, last_note, false)});
+                    smf.tracks[0].push(midly::TrackEvent {delta: 0.into(), kind: note_swap(0, note, true)});
 
                     // dbg!(note);
 
@@ -87,12 +82,9 @@ impl MidiHandler{
                     last_event = Instant::now();
                 }
                 
-                prev_poll = Instant::now();
-
                 if smf.tracks[0].len() > 75 {
                     break
                 }
-            }
         }
 
         let end_diff = Instant::now().duration_since(last_event).as_millis();
