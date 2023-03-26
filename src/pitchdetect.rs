@@ -3,7 +3,7 @@ use bus::{Bus,BusReader};
 use pitch_detection::detector::mcleod::McLeodDetector;
 use pitch_detection::detector::PitchDetector;
 
-const SNAPSHOT_BUFFLEN:usize = 1024;//882;//1024;
+const SNAPSHOT_BUFFLEN:usize = 1024;
 const PADDING: usize = SNAPSHOT_BUFFLEN / 2;
 // we capture audio in 20ms chunks so it would be wasteful to attempt to aquire a lock more frequently than 20ms
 

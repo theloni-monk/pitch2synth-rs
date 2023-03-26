@@ -82,9 +82,9 @@ impl MidiHandler{
                     last_event = Instant::now();
                 }
                 
-                if smf.tracks[0].len() > 75 {
-                    break
-                }
+                // if smf.tracks[0].len() > 75 {
+                //     break
+                // }
         }
 
         let end_diff = Instant::now().duration_since(last_event).as_millis();
