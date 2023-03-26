@@ -4,7 +4,7 @@ use pitch_detection::detector::mcleod::McLeodDetector;
 use pitch_detection::detector::PitchDetector;
 
 //TODO: query these
-const SNAPSHOT_BUFFLEN:usize = 1024;
+const SNAPSHOT_BUFFLEN:usize = 160;
 const SAMPLE_RATE: usize = 48000;
 
 const PADDING: usize = SNAPSHOT_BUFFLEN / 2;

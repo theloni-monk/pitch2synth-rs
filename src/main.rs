@@ -27,7 +27,7 @@ use ringbuffer::{AllocRingBuffer, RingBufferWrite, RingBufferExt};
 mod pitchdetect;
 mod midihandler;
 
-const SNAPSHOT_BUFFLEN:usize = 1024;
+const SNAPSHOT_BUFFLEN:usize = 160;
 const CONTOUR_BUFFLEN:usize = 128;
 
 struct App {
@@ -126,7 +126,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         handler.run();
     }).unwrap();
 
-
     // create app and run it
     let tick_rate = Duration::from_millis(1);
     let app = App::new();
@@ -171,7 +170,10 @@ fn run_app<B: Backend>(
         app.f0_contour.push((timestamp, if voiced {f0} else {0.0f32}));
 
         // render ui
-        terminal.draw(|f| ui(f, &app))?;
+        terminal.draw(|f| ui(f, &app))?; //temp disable terminal drawing
+
+
+
 
         // poll for quit event
         let timeout = tick_rate
