@@ -1,7 +1,6 @@
-use std::time::{Instant, Duration};
 use bus::BusReader;
-use midly::{Smf, live::LiveEvent, MidiMessage, Header, Format, Timing, num::{u4, u7}, TrackEventKind};
-use midir::{MidiOutput, MidiOutputConnection, MidiOutputPort};
+use midly::{live::LiveEvent, MidiMessage};
+use midir::{MidiOutputConnection};
 use ringbuffer::{AllocRingBuffer, RingBufferWrite, RingBufferExt};
 
 const A4: f32 = 440.0;
@@ -10,7 +9,6 @@ const BUFFER_CAP: u8 = 16;
 pub struct MidiHandler{
     freq_rx: BusReader<(f32, f32, bool, f32)>,
     buffer: AllocRingBuffer<f32>,
-    voiced: bool
 }
 
 fn get_midi_note(frequency: f32) -> u8 {
@@ -18,8 +16,8 @@ fn get_midi_note(frequency: f32) -> u8 {
     semitone.round() as u8 
 }
 
-fn note_swap(channel: u8, key: u8, on: bool) -> TrackEventKind<'static>{
-    let ev = midly::TrackEventKind::Midi{
+fn note_swap(channel: u8, key: u8, on: bool) -> LiveEvent<'static>{
+    let ev = midly::live::LiveEvent::Midi{
         channel: channel.into(),
         message: match on {
             true => MidiMessage::NoteOn {
@@ -35,11 +33,21 @@ fn note_swap(channel: u8, key: u8, on: bool) -> TrackEventKind<'static>{
     ev
 }
 
+fn send_live_message(curr_note: &u8, last_note: u8, output: &mut MidiOutputConnection) {
+    let mut live_buffer = Vec::new();
+                    
+    note_swap(0, last_note, false).write(&mut live_buffer).unwrap();
+    output.send(&live_buffer[..]).expect("Couldn't send MIDI message!");
+    live_buffer.clear();
+
+    note_swap(0, *curr_note, true).write(&mut live_buffer).unwrap();
+    output.send(&live_buffer[..]).expect("Couldn't send MIDI message!");
+}
+
 impl MidiHandler{
     pub fn new(f0_rx:BusReader<(f32, f32, bool, f32)>) -> MidiHandler{
         MidiHandler{
             freq_rx: f0_rx,
-            voiced: false,
             buffer: AllocRingBuffer::with_capacity(BUFFER_CAP.into())
         }
     }
@@ -54,43 +62,31 @@ impl MidiHandler{
          * Send midi event over USB
          */
         
-        let mut prev_poll = Instant::now();
-        let mut last_event = Instant::now();
+        let midi_out = midir::MidiOutput::new("main").unwrap();
+        if midi_out.port_count() < 1{
+            println!("couldn't find any midi outputs!");
+            std::process::exit(0);
+        }
+        let main_port = &midi_out.ports()[0];
+        let port_name = midi_out.port_name(&main_port).expect("couldn't find port name!");
+        println!("Default Midi port chosen: {:?}", &port_name);
+        let mut output_connection = midi_out.connect(&main_port, &port_name).expect("couldn't establish connection");
 
         let mut last_note: u8 = 0;
-        let mut smf = Smf::new(Header {
-                                format: Format::SingleTrack,
-                                timing: Timing::Timecode(midly::Fps::Fps25, 40) 
-                            });
-        
-        smf.tracks.push(Vec::new());
 
-        //implement Live event messaging
         loop{
-                let (_timestamp, f0, _voiced, _vprob) = self.freq_rx.recv().unwrap();
-                self.buffer.push(f0);
-                let note = get_midi_note(self.buffer.iter().sum::<f32>() / BUFFER_CAP as f32);
-                if note != last_note {
-                    let diff = Instant::now().duration_since(last_event).as_millis();
+            let (_timestamp, f0, _voiced, _vprob) = self.freq_rx.recv().unwrap();
+            self.buffer.push(f0);
+            
+            let note = get_midi_note(self.buffer.iter().sum::<f32>() / BUFFER_CAP as f32);
 
-                    smf.tracks[0].push(midly::TrackEvent {delta: (diff as u32).into(), kind: note_swap(0, last_note, false)});
-                    smf.tracks[0].push(midly::TrackEvent {delta: 0.into(), kind: note_swap(0, note, true)});
+            if note != last_note {
 
-                    // dbg!(note);
+                send_live_message(&note, last_note, &mut output_connection);
+                last_note = note;
 
-                    last_note = note;
-                    last_event = Instant::now();
-                }
-                
-                // if smf.tracks[0].len() > 75 {
-                //     break
-                // }
+            }
         }
-
-        let end_diff = Instant::now().duration_since(last_event).as_millis();
-        smf.tracks[0].push(midly::TrackEvent {delta: (end_diff as u32).into(), kind: midly::TrackEventKind::Meta(midly::MetaMessage::EndOfTrack)});
-        println!("{:?}", smf.tracks);
-
     }
 
 }

@@ -28,6 +28,7 @@ mod pitchdetect;
 mod midihandler;
 //FIXME: allow for oversized buffer
 const SNAPSHOT_BUFFLEN:usize = 1024; //882
+
 const CONTOUR_BUFFLEN:usize = 128;
 
 #[derive(Parser, Debug)]
@@ -171,7 +172,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut handler = midihandler::MidiHandler::new(midi_handler_rx);
         handler.run();
     }).unwrap();
-
 
     // create app and run it
     let tick_rate = Duration::from_millis(1);
