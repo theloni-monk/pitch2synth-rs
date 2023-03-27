@@ -1,9 +1,9 @@
 use std::array;
 
-
-const BLOCKSIZE:usize = 882;//1024;
-const NUM_FREQS: usize = 48;
-const THRESH: f32 = 200.0;
+use crate::SNAPSHOT_BUFFLEN;
+use crate::NUM_FREQS;
+use crate::NOISE_THRESH;
+//TODO: tune thresh
 
 
 fn argmax(slice: &[f32]) -> i8 {
@@ -17,17 +17,18 @@ fn argmax(slice: &[f32]) -> i8 {
     }
     return max_idx;
 }
+
 // TODO: execute goertzel for 4 freqs at once via SIMD
 pub fn goertzel(buff:&[f32], target_freq:f32, srate:f32) -> f32{
-    let k = (0.5+((BLOCKSIZE as f32 *target_freq)/srate)).round();
-    let w = (2.0*std::f32::consts::PI/BLOCKSIZE as f32) * k;
+    let k = (0.5+((SNAPSHOT_BUFFLEN as f32 *target_freq)/srate)).round();
+    let w = (2.0*std::f32::consts::PI/SNAPSHOT_BUFFLEN as f32) * k;
 
     let coeff = 2.0 * w.cos();
 
     let mut q0;
     let mut q1 = 0.0;
     let mut q2 = 0.0;
-    for i in 1..BLOCKSIZE{
+    for i in 1..SNAPSHOT_BUFFLEN{
         q0 = coeff * q1 - q2 + buff[i];
         q2 = q1;
         q1 = q0;
@@ -38,10 +39,9 @@ pub fn goertzel(buff:&[f32], target_freq:f32, srate:f32) -> f32{
 }
 
 pub struct GoertzelEstimator{
-    buff: [f32; BLOCKSIZE],
     thresh: f32,
     target_freqs: [f32; NUM_FREQS],
-    gvec: [f32; NUM_FREQS],
+    pub gvec: [f32; NUM_FREQS],
     srate:f32
 }
 
@@ -54,17 +54,15 @@ impl GoertzelEstimator{
         });
         
         GoertzelEstimator{
-            buff:[0.0;BLOCKSIZE],
             target_freqs: freq_array,
-            thresh: THRESH,
+            thresh: NOISE_THRESH,
             gvec: [0.0; NUM_FREQS],
             srate:srate
         }
     }
 
-    pub fn process(&mut self, buff:&[f32;BLOCKSIZE]){
-        self.buff = buff.clone();
-        self.gvec = array::from_fn(|i| goertzel(&self.buff, self.target_freqs[i], self.srate));
+    pub fn process(&mut self, buff:&[f32;SNAPSHOT_BUFFLEN]){
+        self.gvec = array::from_fn(|i| goertzel(buff, self.target_freqs[i], self.srate));
     }
 
     pub fn get_pitch(&mut self)->(f32, f32){
@@ -72,10 +70,9 @@ impl GoertzelEstimator{
         if idx == -1 {
             return (0.0, 0.0);
         }
-        if(self.gvec[idx as usize] < self.thresh) {
+        if self.gvec[idx as usize] < self.thresh {
             return (0.0, 0.0);
         }
-
-        (self.target_freqs[idx as usize], self.gvec[idx as usize])
+        return (self.target_freqs[idx as usize], self.gvec[idx as usize]);
     }
 }
