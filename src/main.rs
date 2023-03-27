@@ -27,7 +27,7 @@ use bus::{Bus, BusReader};
 mod pitchdetect;
 mod midihandler;
 //FIXME: allow for oversized buffer
-const SNAPSHOT_BUFFLEN:usize = 1024; //882
+const SNAPSHOT_BUFFLEN:usize = 882; //1024;
 
 const CONTOUR_BUFFLEN:usize = 128;
 
@@ -163,13 +163,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cthresh = args.clairty_thresh.clone();
     let _pitch_thread_handle = thread::Builder::new().name("PitchDetectionThread".to_string())
     .spawn(closure!(move sr, move pthresh, move cthresh, move pitch_snapshot_rx, move mut f0_bus, ||{
-        let mut detector = pitchdetect::PitchEstimator::new(sr, pitch_snapshot_rx, f0_bus, pthresh, cthresh);//TODO: query sample rate
+        let mut detector = pitchdetect::PitchEstimatorThread::new(sr, pitch_snapshot_rx, f0_bus, pthresh, cthresh);//TODO: query sample rate
         detector.run();
     })).unwrap();
 
     let _midi_thread_handle = thread::Builder::new().name("MidiHandlerThread".to_string())
     .spawn(||{
-        let mut handler = midihandler::MidiHandler::new(midi_handler_rx);
+        let mut handler = midihandler::MidiHandlerThread::new(midi_handler_rx);
         handler.run();
     }).unwrap();
 
@@ -222,6 +222,7 @@ fn run_app<B: Backend>(
         if crossterm::event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 if let KeyCode::Char('q') = key.code {
+
                     return Ok(());
                 }
             }
@@ -343,9 +344,9 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
                 .style(Style::default().fg(Color::Gray))
                 .labels(vec![
                     Span::styled("0hz", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::styled("660hz", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("200hz", Style::default().add_modifier(Modifier::BOLD)),
                 ])
-                .bounds([0.0, 660.0]),
+                .bounds([0.0, 200.0]),
         );
     f.render_widget(chart, chunks[1]);
     

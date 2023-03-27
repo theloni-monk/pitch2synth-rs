@@ -17,3 +17,4 @@ closure = "0.3.0"
 ringbuffer = "0.12.0"
 clap = { version = "4.1.13", features = ["derive"] }
 bus = "2.3.0"
+ordered-float = "3.6.0"
