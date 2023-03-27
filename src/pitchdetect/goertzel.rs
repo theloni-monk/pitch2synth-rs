@@ -3,6 +3,8 @@ use std::array;
 use crate::SNAPSHOT_BUFFLEN;
 use crate::NUM_FREQS;
 use crate::NOISE_THRESH;
+
+use super::NUM_FRAMES_CONCAT;
 //TODO: tune thresh
 
 
@@ -17,25 +19,25 @@ fn argmax(slice: &[f32]) -> i8 {
     }
     return max_idx;
 }
-
+// FIXME: not behaving as usual
 // TODO: execute goertzel for 4 freqs at once via SIMD
 pub fn goertzel(buff:&[f32], target_freq:f32, srate:f32) -> f32{
-    let k = (0.5+((SNAPSHOT_BUFFLEN as f32 *target_freq)/srate)).round();
-    let w = (2.0*std::f32::consts::PI/SNAPSHOT_BUFFLEN as f32) * k;
+    let k = (0.5+((buff.len() as f32 * target_freq)/srate)).floor();
+    let w = (2.0*std::f32::consts::PI/(buff.len() as f32)) * k;
 
     let coeff = 2.0 * w.cos();
 
     let mut q0;
     let mut q1 = 0.0;
     let mut q2 = 0.0;
-    for i in 1..SNAPSHOT_BUFFLEN{
+    for i in 1..buff.len(){
         q0 = coeff * q1 - q2 + buff[i];
         q2 = q1;
         q1 = q0;
     }
 
     let magsquared = q1*q1 + (q2*q2) - (q1*q2*coeff);
-    return magsquared;
+    return magsquared.sqrt();
 }
 
 pub struct GoertzelEstimator{
@@ -47,12 +49,12 @@ pub struct GoertzelEstimator{
 
 impl GoertzelEstimator{
     pub fn new(min_freq:f32, srate:f32) -> GoertzelEstimator{
-        let tw_root_of_two:f32 = 2.0f32.powf(1.0/12.0); 
+        let tw_root_of_two:f32 = 2.0f32.powf(1.0/12.0);
 
         let freq_array:[f32;NUM_FREQS] = array::from_fn(|i|{
             min_freq * tw_root_of_two.powf(i as f32)
         });
-        
+        //println!("{:?}", freq_array);
         GoertzelEstimator{
             target_freqs: freq_array,
             thresh: NOISE_THRESH,
@@ -61,7 +63,7 @@ impl GoertzelEstimator{
         }
     }
 
-    pub fn process(&mut self, buff:&[f32;SNAPSHOT_BUFFLEN]){
+    pub fn process(&mut self, buff:&[f32;SNAPSHOT_BUFFLEN*NUM_FRAMES_CONCAT]){
         self.gvec = array::from_fn(|i| goertzel(buff, self.target_freqs[i], self.srate));
     }
 
