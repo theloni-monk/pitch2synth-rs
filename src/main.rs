@@ -2,7 +2,7 @@ use std::{
     error::Error,
     io,
     thread,
-    time::{Duration, Instant}
+    time::{Duration, Instant},  iter::zip
 };
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
@@ -15,7 +15,7 @@ use tui::{
     style::{Color, Modifier, Style},
     symbols,
     text::Span,
-    widgets::{Axis, Block, Borders, Chart, Dataset},
+    widgets::{Axis, Block, Borders, Chart, Dataset, BarChart},
     Frame, Terminal,
 };
 use clap::Parser;
@@ -28,8 +28,12 @@ mod pitchdetect;
 mod midihandler;
 //FIXME: allow for oversized buffer
 const SNAPSHOT_BUFFLEN:usize = 882; //1024;
-
+const MIDIDEVICE_IDX:usize = 1;
 const CONTOUR_BUFFLEN:usize = 128;
+const MIN_FREQ:f32 = 20.602; // E1
+const NUM_FREQS:usize = 96;
+const NOISE_THRESH: f32 = 100.0;
+const BIN_LABELS:[&'static str; NUM_FREQS] = ["_";NUM_FREQS];
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -41,9 +45,6 @@ struct AppArgs{
     #[arg(short, long, default_value_t = 48000)]
     srate: usize,
 
-    #[arg(short, long, default_value_t = 2.0)]
-    power_thresh: f32,
-
     #[arg(short, long, default_value_t = 0.2)]
     clairty_thresh: f32,
 
@@ -51,19 +52,24 @@ struct AppArgs{
     no_ui: bool
 }
 
-struct App {
+struct App<'a> {
     waveform_snapshot: [(f32, f32); SNAPSHOT_BUFFLEN],
     f0_contour: AllocRingBuffer<(f32, f32)>,
+    spectrogram: Vec<(&'a str, u64)>,
     wavviz_window: [f64; 2],
     f0_window: [f64; 2]
 }
 
-impl App {
-    fn new() -> App {
+impl <'a> App <'a> {
+    fn new() -> App<'a> {
+
+        let str_freq_arr = BIN_LABELS.into_iter();
+        let init_freq_amps = [0u64; NUM_FREQS];
         App {
             waveform_snapshot: [(0.0, 0.0);SNAPSHOT_BUFFLEN],
             wavviz_window: [0.0, 63555000.0],
             f0_contour: AllocRingBuffer::with_capacity(CONTOUR_BUFFLEN),
+            spectrogram: zip(str_freq_arr, init_freq_amps).collect::<Vec<(&str, u64)>>(),
             f0_window: [0.0, 63555000.0]
         }
     }
@@ -152,20 +158,20 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 
     // establish commincation lines to pitch estimator thread
-   
-    // run pitch estimator in new thread
     let mut f0_bus:Bus<(f32, f32, bool, f32)> = Bus::new(8);
     let freqviz_rx = f0_bus.add_rx();
     let midi_handler_rx = f0_bus.add_rx();
+    let mut spectrogram_bus:Bus<[u64;NUM_FREQS]> = Bus::new(8);
+    let spectrogram_rx = spectrogram_bus.add_rx();
 
     let sr = args.srate.clone();
-    let pthresh = args.power_thresh.clone();
     let cthresh = args.clairty_thresh.clone();
     let _pitch_thread_handle = thread::Builder::new().name("PitchDetectionThread".to_string())
-    .spawn(closure!(move sr, move pthresh, move cthresh, move pitch_snapshot_rx, move mut f0_bus, ||{
-        let mut detector = pitchdetect::PitchEstimatorThread::new(sr, pitch_snapshot_rx, f0_bus, pthresh, cthresh);//TODO: query sample rate
+    .spawn(closure!(move sr,  move cthresh, move pitch_snapshot_rx, move mut f0_bus, move mut spectrogram_bus, ||{
+        let mut detector = pitchdetect::PitchEstimatorThread::new(sr, pitch_snapshot_rx, f0_bus, spectrogram_bus, cthresh);//TODO: query sample rate
         detector.run();
     })).unwrap();
+
 
     let _midi_thread_handle = thread::Builder::new().name("MidiHandlerThread".to_string())
     .spawn(||{
@@ -176,7 +182,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // create app and run it
     let tick_rate = Duration::from_millis(1);
     let app = App::new();
-    let res = run_app(&mut terminal, app, tick_rate, wavviz_snapshot_rx, freqviz_rx, !args.no_ui);
+    let res = run_app(&mut terminal, app, tick_rate, wavviz_snapshot_rx, freqviz_rx, spectrogram_rx, !args.no_ui);
 
     // restore terminal
     disable_raw_mode()?;
@@ -200,6 +206,7 @@ fn run_app<B: Backend>(
     tick_rate: Duration, 
     mut snapshot_rx: BusReader<[(f32, f32); SNAPSHOT_BUFFLEN]>,
     mut contour_rx: BusReader<(f32, f32, bool, f32)>,
+    mut spectrogram_rx: BusReader<[u64; NUM_FREQS]>,
     render_ui: bool
 ) -> io::Result<()> {
     let mut last_tick = Instant::now();
@@ -211,6 +218,12 @@ fn run_app<B: Backend>(
         // attempt to read new freq frame, if fail: use previous values
         let (timestamp, f0, voiced, _vprob) = contour_rx.recv().unwrap();//.unwrap_or((prev_timestamp, prev_f0, prev_voiced, 0.0f32));
         app.f0_contour.push((timestamp, if voiced {f0} else {0.0f32}));
+
+        let specdata = spectrogram_rx.recv().unwrap();
+        for i in 0..NUM_FREQS{
+            app.spectrogram[i].1 = specdata[i];
+        }
+
 
         // render ui
         if render_ui {terminal.draw(|f| ui(f, &app))?;}
@@ -241,13 +254,37 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
         .direction(Direction::Vertical)
         .constraints(
             [
-                Constraint::Ratio(1, 2),
-                Constraint::Ratio(1, 2),
+                Constraint::Percentage(50),
+                Constraint::Percentage(50)
             ]
             .as_ref(),
         )
         .split(size);
-
+    
+    let mut bardata = app.spectrogram.clone();
+    if bardata.iter().map(|el| el.1).sum::<u64>() < NOISE_THRESH as u64 * NUM_FREQS as u64 {
+        for i in 0..NUM_FREQS{
+            bardata[i].1 = 0;
+        }
+    }
+    let barchart = BarChart::default()
+        .block(Block::default().title("Spectrogram").borders(Borders::ALL))
+        .data(bardata.as_slice())
+        .bar_width(1)
+        .bar_gap(1)
+        .bar_style(Style::default().fg(Color::White))
+        .value_style(
+            Style::default()
+                .bg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        );
+        f.render_widget(barchart, chunks[0]);
+    
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
+        .split(chunks[1]);
+    
 
     let wavviz_x_labels = vec![
         Span::styled(
@@ -264,7 +301,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
     let wav_datavec = vec![
         Dataset::default()
             .name("waveform_snapshot")
-            .marker(symbols::Marker::Dot)
+            .marker(symbols::Marker::Braille)
             .style(Style::default().fg(Color::Cyan))
             .data(wav_data.as_slice())
     ];
@@ -344,10 +381,14 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
                 .style(Style::default().fg(Color::Gray))
                 .labels(vec![
                     Span::styled("0hz", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::styled("200hz", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("600hz", Style::default().add_modifier(Modifier::BOLD)),
                 ])
-                .bounds([0.0, 200.0]),
+                .bounds([0.0, 600.0]),
         );
     f.render_widget(chart, chunks[1]);
     
+
+
+    
+
 }

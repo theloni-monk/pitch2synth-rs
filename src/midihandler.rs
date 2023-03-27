@@ -3,8 +3,9 @@ use midir::MidiOutputConnection;
 use midly::{live::LiveEvent, MidiMessage};
 use ringbuffer::{AllocRingBuffer, RingBufferExt, RingBufferWrite};
 
+use crate::MIDIDEVICE_IDX;
 const A4: f32 = 440.0;
-const BUFFER_CAP: u8 = 16;
+const BUFFER_CAP: u8 = 8;
 
 pub struct MidiHandlerThread {
     freq_rx: BusReader<(f32, f32, bool, f32)>,
@@ -74,7 +75,7 @@ impl MidiHandlerThread {
             println!("couldn't find any midi outputs!");
             std::process::exit(0);
         }
-        let main_port = &midi_out.ports()[1]; //FIXME: dynamically select
+        let main_port = &midi_out.ports()[MIDIDEVICE_IDX]; //FIXME: dynamically select
         let port_name = midi_out
             .port_name(&main_port)
             .expect("couldn't find port name!");
