@@ -28,11 +28,14 @@ mod pitchdetect;
 mod midihandler;
 //FIXME: allow for oversized buffer
 const SNAPSHOT_BUFFLEN:usize = 882; //1024;
-const MIDIDEVICE_IDX:usize = 1;
 const CONTOUR_BUFFLEN:usize = 128;
-const MIN_FREQ:f32 = 20.602; // E1
+
+const MIN_FREQ:f32 = 15.434; //B1
 const NUM_FREQS:usize = 96;
-const NOISE_THRESH: f32 = 100.0;
+const NOISE_THRESH: f32 = 50.0;
+
+const MIDIDEVICE_IDX:usize = 1;
+
 const BIN_LABELS:[&'static str; NUM_FREQS] = ["_";NUM_FREQS];
 
 #[derive(Parser, Debug)]
@@ -55,7 +58,7 @@ struct AppArgs{
 struct App<'a> {
     waveform_snapshot: [(f32, f32); SNAPSHOT_BUFFLEN],
     f0_contour: AllocRingBuffer<(f32, f32)>,
-    spectrogram: Vec<(&'a str, u64)>,
+    spectrogram: Vec<(&'a str, f32)>,
     wavviz_window: [f64; 2],
     f0_window: [f64; 2]
 }
@@ -64,12 +67,12 @@ impl <'a> App <'a> {
     fn new() -> App<'a> {
 
         let str_freq_arr = BIN_LABELS.into_iter();
-        let init_freq_amps = [0u64; NUM_FREQS];
+        let init_freq_amps = [0.0f32; NUM_FREQS];
         App {
             waveform_snapshot: [(0.0, 0.0);SNAPSHOT_BUFFLEN],
             wavviz_window: [0.0, 63555000.0],
             f0_contour: AllocRingBuffer::with_capacity(CONTOUR_BUFFLEN),
-            spectrogram: zip(str_freq_arr, init_freq_amps).collect::<Vec<(&str, u64)>>(),
+            spectrogram: zip(str_freq_arr, init_freq_amps).collect::<Vec<(&str, f32)>>(),
             f0_window: [0.0, 63555000.0]
         }
     }
@@ -161,7 +164,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut f0_bus:Bus<(f32, f32, bool, f32)> = Bus::new(8);
     let freqviz_rx = f0_bus.add_rx();
     let midi_handler_rx = f0_bus.add_rx();
-    let mut spectrogram_bus:Bus<[u64;NUM_FREQS]> = Bus::new(8);
+    let mut spectrogram_bus:Bus<[f32;NUM_FREQS]> = Bus::new(8);
     let spectrogram_rx = spectrogram_bus.add_rx();
 
     let sr = args.srate.clone();
@@ -206,7 +209,7 @@ fn run_app<B: Backend>(
     tick_rate: Duration, 
     mut snapshot_rx: BusReader<[(f32, f32); SNAPSHOT_BUFFLEN]>,
     mut contour_rx: BusReader<(f32, f32, bool, f32)>,
-    mut spectrogram_rx: BusReader<[u64; NUM_FREQS]>,
+    mut spectrogram_rx: BusReader<[f32; NUM_FREQS]>,
     render_ui: bool
 ) -> io::Result<()> {
     let mut last_tick = Instant::now();
@@ -261,15 +264,17 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
         )
         .split(size);
     
-    let mut bardata = app.spectrogram.clone();
-    if bardata.iter().map(|el| el.1).sum::<u64>() < NOISE_THRESH as u64 * NUM_FREQS as u64 {
+    let mut bardata_float = app.spectrogram.clone();
+    // supress noise, display all zeros if total strength is less than a tenth of the noise thresh
+    if bardata_float.iter().map(|el| el.1).sum::<f32>() < (NOISE_THRESH * NUM_FREQS as f32)/10.0 {
         for i in 0..NUM_FREQS{
-            bardata[i].1 = 0;
+            bardata_float[i].1 = 0.0;
         }
     }
+    let bardata_u64:Vec<(&str, u64)> = bardata_float.into_iter().map(|(s, f)| (s, f as u64)).collect();
     let barchart = BarChart::default()
         .block(Block::default().title("Spectrogram").borders(Borders::ALL))
-        .data(bardata.as_slice())
+        .data(bardata_u64.as_slice())
         .bar_width(1)
         .bar_gap(1)
         .bar_style(Style::default().fg(Color::White))
@@ -278,8 +283,13 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
                 .bg(Color::White)
                 .add_modifier(Modifier::BOLD),
         );
-        f.render_widget(barchart, chunks[0]);
+
+    f.render_widget(barchart, chunks[0]);
     
+
+
+
+
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
@@ -381,9 +391,9 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
                 .style(Style::default().fg(Color::Gray))
                 .labels(vec![
                     Span::styled("0hz", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::styled("600hz", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("200hz", Style::default().add_modifier(Modifier::BOLD)),
                 ])
-                .bounds([0.0, 600.0]),
+                .bounds([0.0, 200.0]),
         );
     f.render_widget(chart, chunks[1]);
     
