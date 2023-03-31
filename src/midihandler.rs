@@ -3,8 +3,8 @@ use midir::MidiOutputConnection;
 use midly::{live::LiveEvent, MidiMessage};
 use ringbuffer::{AllocRingBuffer, RingBufferExt, RingBufferWrite};
 
-use crate::MIDIDEVICE_IDX;
-const A4: f32 = 440.0;
+use crate::get_midi_note;
+
 const BUFFER_CAP: u8 = 8;
 
 pub struct MidiHandlerThread {
@@ -12,10 +12,7 @@ pub struct MidiHandlerThread {
     buffer: AllocRingBuffer<f32>,
 }
 
-fn get_midi_note(frequency: f32) -> u8 {
-    let semitone = 12.0 * f32::log2(frequency / A4) + 69.0;
-    semitone.round() as u8
-}
+
 
 fn note_swap(channel: u8, key: u8, on: bool) -> LiveEvent<'static> {
     let ev = midly::live::LiveEvent::Midi {
@@ -62,23 +59,17 @@ impl MidiHandlerThread {
     }
 
     pub fn run(&mut self) {
-        // Your code here:
-        /* You probably want something akin to:
-         * Get freq from channel
-         * Process freq data based on past freq data
-         * Decide if note is being played
-         * Send midi event over USB
-         */
 
         let midi_out = midir::MidiOutput::new("main").unwrap();
         if midi_out.port_count() < 1 {
             println!("couldn't find any midi outputs!");
             std::process::exit(0);
         }
-        let main_port = &midi_out.ports()[MIDIDEVICE_IDX]; //FIXME: dynamically select
+        let main_port = &midi_out.ports()[midi_out.port_count()-1]; //chooses the last midi device
         let port_name = midi_out
             .port_name(&main_port)
             .expect("couldn't find port name!");
+        //println!("chose {} as midi out port", port_name);
         //println!("Default Midi port chosen: {:?}", &port_name);
         let mut output_connection = midi_out
             .connect(&main_port, &port_name)
