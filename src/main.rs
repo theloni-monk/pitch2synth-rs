@@ -27,16 +27,32 @@ use bus::{Bus, BusReader};
 mod pitchdetect;
 mod midihandler;
 //FIXME: allow for oversized buffer
-const SNAPSHOT_BUFFLEN:usize = 882; //1024;
+const SNAPSHOT_BUFFLEN:usize = 882;//1024; //882; 
 const CONTOUR_BUFFLEN:usize = 128;
 
-const MIN_FREQ:f32 = 15.434; //B1
+const MIN_FREQ:f32 = 15.434; //B0
+const A4: f32 = 440.0;
 const NUM_FREQS:usize = 96;
-const NOISE_THRESH: f32 = 50.0;
+const NOISE_THRESH: f32 = 100.0;
 
-const MIDIDEVICE_IDX:usize = 1;
 
 const BIN_LABELS:[&'static str; NUM_FREQS] = ["_";NUM_FREQS];
+const NOTE_LABELS:[&'static str; 12] = ["C","C#", "D", "Eb", "E", "F", "F#", "G", "Ab","A", "Bb", "B"];
+fn get_midi_note(frequency: f32) -> u8 {
+    let semitone = 12.0 * f32::log2(frequency / A4) + 69.0;
+    semitone.round() as u8
+}
+fn get_freq(midi_note:u8) -> f32 {
+    let semitone = midi_note as f32 + 1.0; //MIN_FREQ is B1 not C1 so we compensate 
+    let freq = MIN_FREQ * 2.0f32.powf((semitone/12.0)-1.0);
+    return freq;
+}
+fn get_note_label(freq: f32) -> &'static str{
+    let mut midi_idx = get_midi_note(freq);
+    midi_idx = midi_idx % 12;
+    return NOTE_LABELS[midi_idx as usize];
+}
+
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -142,7 +158,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let stream = match sample_format {
         SampleFormat::F32 => device.build_input_stream(&config, 
             closure!(move mut time, move mut prev_time, move mut snapshot_bus, |input:&[f32], _callbackdata| {
-                
+                //FIXME: detect multiple channels interleaved
                 let timediff = (Instant::now().duration_since(prev_time)).as_micros() as f32;
 
                 let mut out:[(f32, f32);SNAPSHOT_BUFFLEN] = [(0.0,0.0); SNAPSHOT_BUFFLEN];
@@ -171,7 +187,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cthresh = args.clairty_thresh.clone();
     let _pitch_thread_handle = thread::Builder::new().name("PitchDetectionThread".to_string())
     .spawn(closure!(move sr,  move cthresh, move pitch_snapshot_rx, move mut f0_bus, move mut spectrogram_bus, ||{
-        let mut detector = pitchdetect::PitchEstimatorThread::new(sr, pitch_snapshot_rx, f0_bus, spectrogram_bus, cthresh);//TODO: query sample rate
+        let mut detector = pitchdetect::PitchEstimatorThread::new(sr, pitch_snapshot_rx, f0_bus, spectrogram_bus, cthresh);
         detector.run();
     })).unwrap();
 
@@ -216,10 +232,10 @@ fn run_app<B: Backend>(
     
     loop {
         // wait for new audio frame
-        app.waveform_snapshot = snapshot_rx.recv().unwrap();//_or([(0.0,0.0);SNAPSHOT_BUFFLEN]);
+        app.waveform_snapshot = snapshot_rx.recv().unwrap();
 
         // attempt to read new freq frame, if fail: use previous values
-        let (timestamp, f0, voiced, _vprob) = contour_rx.recv().unwrap();//.unwrap_or((prev_timestamp, prev_f0, prev_voiced, 0.0f32));
+        let (timestamp, f0, voiced, _vprob) = contour_rx.recv().unwrap();
         app.f0_contour.push((timestamp, if voiced {f0} else {0.0f32}));
 
         let specdata = spectrogram_rx.recv().unwrap();
@@ -266,7 +282,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
     
     let mut bardata_float = app.spectrogram.clone();
     // supress noise, display all zeros if total strength is less than a tenth of the noise thresh
-    if bardata_float.iter().map(|el| el.1).sum::<f32>() < (NOISE_THRESH * NUM_FREQS as f32)/10.0 {
+    if bardata_float.iter().map(|el| el.1).sum::<f32>() < (NOISE_THRESH * NUM_FREQS as f32)/25.0 {
         for i in 0..NUM_FREQS{
             bardata_float[i].1 = 0.0;
         }
@@ -371,7 +387,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &App) {
         .block(
             Block::default()
                 .title(Span::styled(
-                    "f0",
+                    get_note_label(f0_data[0].1 as f32),
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
