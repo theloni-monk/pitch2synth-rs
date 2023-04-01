@@ -9,7 +9,7 @@
             "type": "cppvsdbg",
             "request": "launch",
             "program": "${workspaceFolder}\\target\\debug\\pitch2synth-rs.exe",
-            //"args": ["-d", "Scarlett"],
+            "args": ["-d", "Scarlett", "-s", "44100"],
             "stopAtEntry": false,
             "cwd": "${fileDirname}",
             "environment": [],

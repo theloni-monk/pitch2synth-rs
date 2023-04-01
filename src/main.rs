@@ -27,7 +27,7 @@ use bus::{Bus, BusReader};
 mod pitchdetect;
 mod midihandler;
 //FIXME: allow for oversized buffer
-const SNAPSHOT_BUFFLEN:usize = 882;//1024; //882; 
+const SNAPSHOT_BUFFLEN:usize = 1024; //882; 
 const CONTOUR_BUFFLEN:usize = 128;
 
 const MIN_FREQ:f32 = 15.434; //B0
