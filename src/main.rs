@@ -1,4 +1,4 @@
-use std::{ error::Error, io, thread, time::{ Duration, Instant }, iter::zip };
+use std::{ error::Error, io::{self, Write}, thread, time::{ Duration, Instant }, iter::zip };
 use crossterm::{
     event::{ self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode },
     execute,
@@ -51,15 +51,18 @@ const NOTE_LABELS: [&'static str; 12] = [
     "Bb",
     "B",
 ];
+
 fn get_midi_note(frequency: f32) -> u8 {
     let semitone = 12.0 * f32::log2(frequency / A4) + 69.0;
     semitone.round() as u8
 }
+
 fn get_freq(midi_note: u8) -> f32 {
     let semitone = (midi_note as f32) + 1.0; //MIN_FREQ is B1 not C1 so we compensate
     let freq = MIN_FREQ * (2.0f32).powf(semitone / 12.0 - 1.0);
     return freq;
 }
+
 fn get_note_label(freq: f32) -> &'static str {
     let mut midi_idx = get_midi_note(freq);
     midi_idx = midi_idx % 12;
@@ -112,62 +115,83 @@ impl<'a> App<'a> {
     }
 }
 
+fn select_device_and_config() -> Result<(Device, cpal::SupportedStreamConfig), Box<dyn Error>> {
+    // setup audio stream - interactive device & config selection
+    let host = cpal::default_host();
+
+    // gather input devices
+    let devices = host
+        .input_devices()
+        .expect("No input devices available")
+        .into_iter()
+        .collect::<Vec<Device>>();
+
+    println!("Available input devices:");
+    for (i, d) in devices.iter().enumerate() {
+        println!("  [{}] {}", i, d.name().unwrap_or("<Unknown>".to_string()));
+    }
+
+    // prompt user to select device (press Enter to choose default)
+    print!("Select device index (press Enter for default device): ");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let selection = input.trim();
+
+    let device: Device = if selection.is_empty() {
+        host.default_input_device().expect("No default input device available")
+    } else {
+        let idx: usize = selection.parse().expect("Invalid device index");
+        devices.into_iter().nth(idx).expect("Device index out of range")
+    };
+
+    println!("Selected device: {}", device.name().unwrap_or("<Unknown>".to_string()));
+
+    // list supported configs for chosen device
+    let configs = device
+        .supported_input_configs()
+        .expect("error while querying configs")
+        .into_iter()
+        .collect::<Vec<SupportedStreamConfigRange>>();
+
+    println!("Supported input configs for '{}':", device.name().unwrap_or("<Unknown>".to_string()));
+    for (i, c) in configs.iter().enumerate() {
+        println!(
+            "  [{}] {:?}, channels: {}, min_rate: {}, max_rate: {}, buffer_size: {:?}",
+            i,
+            c.sample_format(),
+            c.channels(),
+            c.min_sample_rate().0,
+            c.max_sample_rate().0,
+            c.buffer_size()
+        );
+    }
+
+    // prompt user to select config (press Enter to choose first config)
+    print!("Select config index (press Enter for first config): ");
+    io::stdout().flush()?;
+    input.clear();
+    io::stdin().read_line(&mut input)?;
+    let selection = input.trim();
+
+    let supported_config = if selection.is_empty() {
+        configs.into_iter().nth(0).expect("no supported config?!").with_max_sample_rate()
+    } else {
+        let idx: usize = selection.parse().expect("Invalid config index");
+        configs.into_iter().nth(idx).expect("config index out of range").with_max_sample_rate()
+    };
+
+    Ok((device, supported_config))
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args = AppArgs::parse();
 
-    // setup terminal
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let (device, supported_config) = select_device_and_config()?;
 
-    //setup audio stream
-    let host = cpal::default_host();
-    let mut device = host.default_input_device().expect("No input device available");
-    if args.device_name != "default" {
-        device = host
-            .input_devices()
-            .unwrap()
-            .into_iter()
-            .find(|d| { d.name().unwrap().contains(&args.device_name) })
-            .unwrap();
-    }
-
-    let mut supported_configs_range = device
-        .supported_input_configs()
-        .expect("error while querying configs");
-    let supported_config = supported_configs_range
-        .next()
-        .expect("no supported config?!")
-        .with_max_sample_rate();
     let err_fn = |err| eprintln!("an error occurred on the output audio stream: {}", err);
     let sample_format = supported_config.sample_format();
     let config = supported_config.into();
-
-    // list available devices and their properties
-    if args.no_ui {
-        println!(
-            "Devices: {:#?}",
-            host
-                .devices()
-                .unwrap()
-                .into_iter()
-                .map(|d: Device| -> String {
-                    format!(
-                        "{} => {:?}",
-                        d.name().unwrap(),
-                        d
-                            .supported_input_configs()
-                            .unwrap()
-                            .into_iter()
-                            .collect::<Vec<SupportedStreamConfigRange>>()
-                    )
-                })
-                .collect::<Vec<String>>()
-        );
-        println!("Selected device: {}", device.name().unwrap());
-    }
 
     //establish channel
     let mut snapshot_bus: Bus<[(f32, f32); SNAPSHOT_BUFFLEN]> = Bus::new(8);
@@ -187,7 +211,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let timediff = (Instant::now().duration_since(prev_time)).as_micros() as f32;
 
                 let mut out:[(f32, f32);SNAPSHOT_BUFFLEN] = [(0.0,0.0); SNAPSHOT_BUFFLEN];
-                for i in 0..input.len(){
+                let max_idx = std::cmp::min(SNAPSHOT_BUFFLEN, input.len());
+                for i in 0..max_idx - 1 {
                     let t = time + ((i+1) as f32 *timediff) as f32;
                     out[i] = (t, input[i]); // create tuple of timestamp with each sample
                 } 
@@ -212,14 +237,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let sr = args.srate.clone();
     let cthresh = args.clairty_thresh.clone();
-    let _pitch_thread_handle = thread::Builder
+    let pitch_thread_handle = thread::Builder
         ::new()
         .name("PitchDetectionThread".to_string())
         .spawn(
-            closure!(move sr,  move cthresh, move pitch_snapshot_rx, move mut f0_bus, move mut spectrogram_bus, ||{
-        let mut detector = pitchdetect::PitchEstimatorThread::new(sr, pitch_snapshot_rx, f0_bus, spectrogram_bus, cthresh);
-        detector.run();
-    })
+            closure!(move sr,  move cthresh, move pitch_snapshot_rx, move mut f0_bus, move mut spectrogram_bus, || {
+                let mut detector = pitchdetect::PitchEstimatorThread::new(sr, pitch_snapshot_rx, f0_bus, spectrogram_bus, cthresh);
+                detector.run();
+            })
         )
         .unwrap();
 
@@ -231,6 +256,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             handler.run();
         })
         .unwrap();
+
+    // setup terminal
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
 
     // create app and run it
     let tick_rate = Duration::from_millis(1);
@@ -244,6 +276,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         spectrogram_rx,
         !args.no_ui
     );
+
+    stream.pause().unwrap();
 
     // restore terminal
     disable_raw_mode()?;
@@ -290,6 +324,7 @@ fn run_app<B: Backend>(
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
             .unwrap_or_else(|| Duration::from_secs(0));
+
         if crossterm::event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 if let KeyCode::Char('q') = key.code {
