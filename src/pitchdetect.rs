@@ -1,5 +1,5 @@
-use bus::{Bus, BusReader};
-use ringbuffer::{AllocRingBuffer, RingBufferWrite};
+use bus::{ Bus, BusReader };
+use ringbuffer::{ AllocRingBuffer, RingBufferWrite };
 
 use crate::MIN_FREQ;
 use crate::NUM_FREQS;
@@ -23,7 +23,7 @@ impl PitchEstimatorThread {
         snapshot_ref: BusReader<[(f32, f32); SNAPSHOT_BUFFLEN]>,
         f0_tx: Bus<(f32, f32, bool, f32)>,
         spec_tx: Bus<[f32; NUM_FREQS]>,
-        cthresh: f32,
+        cthresh: f32
     ) -> PitchEstimatorThread {
         let detector = goertzel::GoertzelEstimator::new(MIN_FREQ, sr as f32);
         let mut ringbuff = AllocRingBuffer::with_capacity(NUM_FRAMES_CONCAT);
@@ -41,13 +41,13 @@ impl PitchEstimatorThread {
         let mut multi_frame_snapshot = [(0.0, 0.0); SNAPSHOT_BUFFLEN * NUM_FRAMES_CONCAT];
 
         loop {
-            self.waveform_snapshot_buffer
-                .push(self.audio_rx.recv().unwrap());
+            self.waveform_snapshot_buffer.push(self.audio_rx.recv().unwrap());
 
             for i in 0..NUM_FRAMES_CONCAT {
                 for j in 0..SNAPSHOT_BUFFLEN {
-                    multi_frame_snapshot[i * SNAPSHOT_BUFFLEN + j] =
-                        self.waveform_snapshot_buffer[i as isize][j];
+                    multi_frame_snapshot[i * SNAPSHOT_BUFFLEN + j] = self.waveform_snapshot_buffer[
+                        i as isize
+                    ][j];
                 }
             }
 
@@ -60,8 +60,7 @@ impl PitchEstimatorThread {
             let pitch = self.predictor.get_pitch();
 
             self.spec_tx.broadcast(self.predictor.gvec);
-            self.pitch_tx
-                .broadcast((timestamp, pitch.0, pitch.1 > self.cthresh, pitch.1));
+            self.pitch_tx.broadcast((timestamp, pitch.0, pitch.1 > self.cthresh, pitch.1));
         }
     }
 }
