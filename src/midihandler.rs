@@ -2,6 +2,8 @@ use bus::BusReader;
 use midir::MidiOutputConnection;
 use midly::{ live::LiveEvent, MidiMessage };
 use ringbuffer::{ AllocRingBuffer, RingBufferExt, RingBufferWrite };
+use std::sync::Arc;
+use std::sync::atomic::{ AtomicBool, Ordering };
 
 use crate::get_midi_note;
 
@@ -10,6 +12,7 @@ const BUFFER_CAP: u8 = 8;
 pub struct MidiHandlerThread {
     freq_rx: BusReader<(f32, f32, bool, f32)>,
     buffer: AllocRingBuffer<f32>,
+    running: Arc<AtomicBool>,
 }
 
 fn note_swap(channel: u8, key: u8, on: bool) -> LiveEvent<'static> {
@@ -43,10 +46,11 @@ fn send_live_message(curr_note: &u8, last_note: u8, output: &mut MidiOutputConne
 }
 
 impl MidiHandlerThread {
-    pub fn new(f0_rx: BusReader<(f32, f32, bool, f32)>) -> MidiHandlerThread {
+    pub fn new(f0_rx: BusReader<(f32, f32, bool, f32)>, running: Arc<AtomicBool>) -> MidiHandlerThread {
         MidiHandlerThread {
             freq_rx: f0_rx,
             buffer: AllocRingBuffer::with_capacity(BUFFER_CAP.into()),
+            running: running,
         }
     }
 
@@ -58,8 +62,7 @@ impl MidiHandlerThread {
         }
         let main_port = &midi_out.ports()[midi_out.port_count() - 1]; //chooses the last midi device
         let port_name = midi_out.port_name(&main_port).expect("couldn't find port name!");
-        //println!("chose {} as midi out port", port_name);
-        //println!("Default Midi port chosen: {:?}", &port_name);
+
         let mut output_connection = midi_out
             .connect(&main_port, &port_name)
             .expect("couldn't establish connection");
@@ -67,7 +70,14 @@ impl MidiHandlerThread {
         let mut last_note: u8 = 0;
 
         loop {
-            let (_timestamp, f0, _voiced, _vprob) = self.freq_rx.recv().unwrap();
+            if !self.running.load(Ordering::SeqCst) {
+                break;
+            }
+            let (_timestamp, f0, _voiced, _vprob) = match self.freq_rx.recv() {
+                Ok(data) => data,
+                Err(_) => break
+            };
+
             self.buffer.push(f0);
 
             let note = get_midi_note(self.buffer.iter().sum::<f32>() / (BUFFER_CAP as f32));

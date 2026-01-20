@@ -1,5 +1,7 @@
 use bus::{ Bus, BusReader };
 use ringbuffer::{ AllocRingBuffer, RingBufferWrite };
+use std::sync::Arc;
+use std::sync::atomic::{ AtomicBool, Ordering };
 
 use crate::MIN_FREQ;
 use crate::NUM_FREQS;
@@ -15,6 +17,7 @@ pub struct PitchEstimatorThread {
     waveform_snapshot_buffer: AllocRingBuffer<[(f32, f32); SNAPSHOT_BUFFLEN]>,
     predictor: goertzel::GoertzelEstimator,
     cthresh: f32,
+    running: Arc<AtomicBool>,
 }
 
 impl PitchEstimatorThread {
@@ -23,7 +26,8 @@ impl PitchEstimatorThread {
         snapshot_ref: BusReader<[(f32, f32); SNAPSHOT_BUFFLEN]>,
         f0_tx: Bus<(f32, f32, bool, f32)>,
         spec_tx: Bus<[f32; NUM_FREQS]>,
-        cthresh: f32
+        cthresh: f32,
+        running: Arc<AtomicBool>,
     ) -> PitchEstimatorThread {
         let detector = goertzel::GoertzelEstimator::new(MIN_FREQ, sr as f32);
         let mut ringbuff = AllocRingBuffer::with_capacity(NUM_FRAMES_CONCAT);
@@ -35,13 +39,22 @@ impl PitchEstimatorThread {
             waveform_snapshot_buffer: ringbuff,
             predictor: detector,
             cthresh: cthresh,
+            running: running,
         }
     }
     pub fn run(&mut self) {
         let mut multi_frame_snapshot = [(0.0, 0.0); SNAPSHOT_BUFFLEN * NUM_FRAMES_CONCAT];
 
         loop {
-            self.waveform_snapshot_buffer.push(self.audio_rx.recv().unwrap());
+            if !self.running.load(Ordering::SeqCst) {
+                break;
+            }
+            // Break loop if recv fails (sender dropped), allowing thread to terminate
+            let snapshot = match self.audio_rx.recv() {
+                Ok(data) => data,
+                Err(_) => break,
+            };
+            self.waveform_snapshot_buffer.push(snapshot);
 
             for i in 0..NUM_FRAMES_CONCAT {
                 for j in 0..SNAPSHOT_BUFFLEN {

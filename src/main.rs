@@ -1,4 +1,13 @@
-use std::{ error::Error, io::{self, Write}, thread, time::{ Duration, Instant }, iter::zip };
+use core::{panic, time};
+use std::{
+    error::Error,
+    io::{ self, Write },
+    thread,
+    time::{ Duration, Instant },
+    iter::zip,
+    sync::Arc,
+    sync::atomic::{ AtomicBool, Ordering },
+};
 use crossterm::{
     event::{ self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode },
     execute,
@@ -193,13 +202,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     let sample_format = supported_config.sample_format();
     let config = supported_config.into();
 
+    let running = Arc::new(AtomicBool::new(true));
+
     //establish channel
     let mut snapshot_bus: Bus<[(f32, f32); SNAPSHOT_BUFFLEN]> = Bus::new(8);
     let pitch_snapshot_rx = snapshot_bus.add_rx();
     let wavviz_snapshot_rx = snapshot_bus.add_rx();
+
     // init timing vars
     let prev_time = Instant::now();
     let time = 0.0;
+    
     //let audio_thread_snapshot_ref:Arc<Mutex<[(f32, f32); SNAPSHOT_BUFFLEN]>> = Arc::clone(&snapshot);
     let stream = (
         match sample_format {
@@ -232,27 +245,31 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut f0_bus: Bus<(f32, f32, bool, f32)> = Bus::new(8);
     let freqviz_rx = f0_bus.add_rx();
     let midi_handler_rx = f0_bus.add_rx();
+
     let mut spectrogram_bus: Bus<[f32; NUM_FREQS]> = Bus::new(8);
     let spectrogram_rx = spectrogram_bus.add_rx();
 
     let sr = args.srate.clone();
     let cthresh = args.clairty_thresh.clone();
+
+    let pitch_running = running.clone();
     let pitch_thread_handle = thread::Builder
         ::new()
         .name("PitchDetectionThread".to_string())
         .spawn(
-            closure!(move sr,  move cthresh, move pitch_snapshot_rx, move mut f0_bus, move mut spectrogram_bus, || {
-                let mut detector = pitchdetect::PitchEstimatorThread::new(sr, pitch_snapshot_rx, f0_bus, spectrogram_bus, cthresh);
+            closure!(move sr,  move cthresh, move pitch_snapshot_rx, move mut f0_bus, move mut spectrogram_bus, move pitch_running, || {
+                let mut detector = pitchdetect::PitchEstimatorThread::new(sr, pitch_snapshot_rx, f0_bus, spectrogram_bus, cthresh, pitch_running);
                 detector.run();
             })
         )
         .unwrap();
 
-    let _midi_thread_handle = thread::Builder
+    let midi_running = running.clone();
+    let midi_thread_handle = thread::Builder
         ::new()
         .name("MidiHandlerThread".to_string())
-        .spawn(|| {
-            let mut handler = midihandler::MidiHandlerThread::new(midi_handler_rx);
+        .spawn(move || {
+            let mut handler = midihandler::MidiHandlerThread::new(midi_handler_rx, midi_running);
             handler.run();
         })
         .unwrap();
@@ -267,7 +284,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // create app and run it
     let tick_rate = Duration::from_millis(1);
     let app = App::new();
-    let res = run_app(
+    run_app(
         &mut terminal,
         app,
         tick_rate,
@@ -275,19 +292,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         freqviz_rx,
         spectrogram_rx,
         !args.no_ui
-    );
-
-    stream.pause().unwrap();
+    ).unwrap();
 
     // restore terminal
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
-
-    if let Err(err) = res {
-        println!("{:?}", err);
-    }
-
+    
+    stream.pause().unwrap();
+    
+    running.store(false, Ordering::SeqCst);
+    pitch_thread_handle.join().expect("Couldn't join pitch thread");
+    midi_thread_handle.join().expect("Couldn't join pitch thread");
+    
     Ok(())
 }
 
