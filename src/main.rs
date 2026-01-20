@@ -23,7 +23,7 @@ use tui::{
     Frame,
     Terminal,
 };
-use clap::Parser;
+use clap::{Parser, builder::Str};
 use cpal::{
     traits::{ HostTrait, DeviceTrait, StreamTrait },
     SampleFormat,
@@ -140,19 +140,33 @@ fn select_device_and_config() -> Result<(Device, cpal::SupportedStreamConfig), B
         println!("  [{}] {}", i, d.name().unwrap_or("<Unknown>".to_string()));
     }
 
-    // prompt user to select device (press Enter to choose default)
-    print!("Select device index (press Enter for default device): ");
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let selection = input.trim();
-
-    let device: Device = if selection.is_empty() {
-        host.default_input_device().expect("No default input device available")
-    } else {
-        let idx: usize = selection.parse().expect("Invalid device index");
-        devices.into_iter().nth(idx).expect("Device index out of range")
-    };
+    let mut device: Device = host.default_input_device().expect("No default input device available");
+    loop {
+        // prompt user to select device (press Enter to choose default)
+        print!("Select device index (press Enter for default device): ");
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let selection = input.trim();
+    
+        if !selection.is_empty() {
+            let idx: usize = match selection.parse() {
+                Ok(idx) => idx,
+                Err(_) => {
+                    println!("Invalid Selection");
+                    continue;
+                }
+            };
+            device = match devices.get(idx){
+                Some(device) => device.clone(),
+                None => {
+                    println!("Invalid Selection");
+                    continue;
+                }
+            };
+        };
+        break;
+    }
 
     println!("Selected device: {}", device.name().unwrap_or("<Unknown>".to_string()));
 
@@ -177,19 +191,34 @@ fn select_device_and_config() -> Result<(Device, cpal::SupportedStreamConfig), B
     }
 
     // prompt user to select config (press Enter to choose first config)
-    print!("Select config index (press Enter for first config): ");
-    io::stdout().flush()?;
-    input.clear();
-    io::stdin().read_line(&mut input)?;
-    let selection = input.trim();
+    let idx: usize = loop {
+        print!("Select config index (press Enter for first config): ");
+        io::stdout().flush()?;
+        let mut input = String::new();
+        input.clear();
+        io::stdin().read_line(&mut input)?;
+        let selection = input.trim();
 
-    let supported_config = if selection.is_empty() {
-        configs.into_iter().nth(0).expect("no supported config?!").with_max_sample_rate()
-    } else {
-        let idx: usize = selection.parse().expect("Invalid config index");
-        configs.into_iter().nth(idx).expect("config index out of range").with_max_sample_rate()
+        if selection.is_empty() {
+            break 0;
+        } else {
+            match selection.parse::<usize>(){
+                Ok(idx) => {
+                    if idx < configs.len() {
+                        break idx
+                    }
+                    println!("Invalid Selection");
+                    continue;
+                },
+                Err(_) => {
+                    println!("Invalid Selection");
+                    continue;
+                }
+            }
+        }
     };
-
+    
+    let supported_config = configs.into_iter().nth(idx).expect("Invalid Stream Config").with_max_sample_rate();
     Ok((device, supported_config))
 }
 
